@@ -4,6 +4,7 @@ import com.dgdev91.mcpsql.model.ColumnInfo;
 import com.dgdev91.mcpsql.model.DatabaseConfig;
 import com.dgdev91.mcpsql.model.TableInfo;
 import com.dgdev91.mcpsql.service.DatabaseService;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -68,7 +69,7 @@ public class SqlMcpServer {
         logger.info("MCP HTTP Server running on port {}", port);
         logger.info("Connect using: http://localhost:{}/mcp", port);
         
-        // POST endpoint for MCP messages (receives requests, responds via both HTTP and SSE)
+        // POST endpoint for MCP messages (receives requests, responds in the HTTP response body)
         app.post("/mcp", ctx -> {
             try {
                 String body = ctx.body();
@@ -77,30 +78,25 @@ public class SqlMcpServer {
                 @SuppressWarnings("unchecked")
                 Map<String, Object> request = objectMapper.readValue(body, Map.class);
                 Map<String, Object> response = handleRequest(request);
-                
+
+                if (response == null) {
+                    // Notification: no JSON-RPC response, just acknowledge
+                    ctx.status(202);
+                    return;
+                }
+
                 String responseJson = objectMapper.writeValueAsString(response);
                 logger.info("Sending MCP response: {}", responseJson);
                 
-                // Send response via HTTP
+                // The response goes only to the caller (Streamable HTTP): broadcasting it
+                // on the SSE streams would leak it to every other connected client
                 ctx.json(response);
-                
-                // Also broadcast via SSE to all connected clients
-                for (SseClient client : sseClients.values()) {
-                    try {
-                        client.sendEvent("message", responseJson);
-                    } catch (Exception e) {
-                        logger.error("Error sending SSE message to client", e);
-                    }
-                }
+            } catch (JsonProcessingException e) {
+                logger.error("Invalid JSON in MCP request", e);
+                ctx.status(400).json(errorResponse(null, -32700, "Parse error"));
             } catch (Exception e) {
                 logger.error("Error processing MCP request", e);
-                Map<String, Object> errorResponse = new HashMap<>();
-                errorResponse.put("jsonrpc", "2.0");
-                errorResponse.put("error", Map.of(
-                    "code", -32603,
-                    "message", e.getMessage()
-                ));
-                ctx.status(500).json(errorResponse);
+                ctx.status(500).json(errorResponse(null, -32603, e.getMessage()));
             }
         });
         
@@ -134,16 +130,24 @@ public class SqlMcpServer {
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(System.in))) {
             String line;
             while ((line = reader.readLine()) != null) {
+                if (line.isBlank()) {
+                    continue;
+                }
+                Map<String, Object> response;
                 try {
                     @SuppressWarnings("unchecked")
                     Map<String, Object> request = objectMapper.readValue(line, Map.class);
-                    Map<String, Object> response = handleRequest(request);
-                    System.out.println(objectMapper.writeValueAsString(response));
+                    response = handleRequest(request);
+                } catch (JsonProcessingException e) {
+                    logger.error("Invalid JSON received", e);
+                    response = errorResponse(null, -32700, "Parse error");
                 } catch (Exception e) {
                     logger.error("Error processing request", e);
-                    Map<String, Object> errorResponse = new HashMap<>();
-                    errorResponse.put("error", e.getMessage());
-                    System.out.println(objectMapper.writeValueAsString(errorResponse));
+                    response = errorResponse(null, -32603, e.getMessage());
+                }
+                // null = notification, nothing to send back
+                if (response != null) {
+                    System.out.println(objectMapper.writeValueAsString(response));
                 }
             }
         } catch (Exception e) {
@@ -151,37 +155,90 @@ public class SqlMcpServer {
         }
     }
 
-    private static Map<String, Object> handleRequest(Map<String, Object> request) throws Exception {
-        String method = (String) request.get("method");
-        @SuppressWarnings("unchecked")
-        Map<String, Object> params = (Map<String, Object>) request.getOrDefault("params", new HashMap<>());
-        
+    /** JSON-RPC protocol-level error (as opposed to a tool execution error). */
+    private static class JsonRpcException extends Exception {
+        final int code;
+
+        JsonRpcException(int code, String message) {
+            super(message);
+            this.code = code;
+        }
+    }
+
+    private static Map<String, Object> errorResponse(Object id, int code, String message) {
+        Map<String, Object> error = new HashMap<>();
+        error.put("code", code);
+        error.put("message", message != null ? message : "Internal error");
+
         Map<String, Object> response = new HashMap<>();
         response.put("jsonrpc", "2.0");
-        response.put("id", request.get("id"));
-        
-        try {
-            Object result = switch (method) {
-                case "initialize" -> handleInitialize();
-                case "tools/list" -> handleToolsList();
-                case "tools/call" -> handleToolCall(params);
-                default -> throw new IllegalArgumentException("Unknown method: " + method);
-            };
-            
-            response.put("result", result);
-        } catch (Exception e) {
-            Map<String, Object> error = new HashMap<>();
-            error.put("code", -32603);
-            error.put("message", e.getMessage());
-            response.put("error", error);
-        }
-        
+        response.put("id", id);
+        response.put("error", error);
         return response;
     }
 
-    private static Map<String, Object> handleInitialize() {
+    /** Returns the JSON-RPC response, or null when none must be sent (notifications). */
+    private static Map<String, Object> handleRequest(Map<String, Object> request) {
+        if (request == null) {
+            return errorResponse(null, -32600, "Invalid Request");
+        }
+
+        Object id = request.get("id");
+        boolean isNotification = !request.containsKey("id");
+
+        if (!(request.get("method") instanceof String method)) {
+            // A response from the client, or a malformed message
+            if (request.containsKey("result") || request.containsKey("error") || isNotification) {
+                return null;
+            }
+            return errorResponse(id, -32600, "Invalid Request");
+        }
+
+        if (isNotification) {
+            // e.g. notifications/initialized, notifications/cancelled: never answered
+            logger.debug("Ignoring notification: {}", method);
+            return null;
+        }
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> params = request.get("params") instanceof Map<?, ?> p
+            ? (Map<String, Object>) p
+            : new HashMap<>();
+
+        try {
+            Object result = switch (method) {
+                case "initialize" -> handleInitialize(params);
+                case "ping" -> Map.of();
+                case "tools/list" -> handleToolsList();
+                case "tools/call" -> handleToolCall(params);
+                default -> throw new JsonRpcException(-32601, "Method not found: " + method);
+            };
+
+            Map<String, Object> response = new HashMap<>();
+            response.put("jsonrpc", "2.0");
+            response.put("id", id);
+            response.put("result", result);
+            return response;
+        } catch (JsonRpcException e) {
+            return errorResponse(id, e.code, e.getMessage());
+        } catch (Exception e) {
+            logger.error("Error handling method {}", method, e);
+            return errorResponse(id, -32603, e.getMessage());
+        }
+    }
+
+    private static final List<String> SUPPORTED_PROTOCOL_VERSIONS =
+        List.of("2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25");
+
+    private static Map<String, Object> handleInitialize(Map<String, Object> params) {
+        // Echo the client's protocol version when supported, otherwise our oldest one
+        Object requested = params.get("protocolVersion");
+        String protocolVersion = SUPPORTED_PROTOCOL_VERSIONS.contains(requested)
+            ? (String) requested
+            : SUPPORTED_PROTOCOL_VERSIONS.get(0);
+
         Map<String, Object> result = new HashMap<>();
-        result.put("protocolVersion", "2024-11-05");
+        result.put("protocolVersion", protocolVersion);
         result.put("serverInfo", Map.of(
             "name", "java-mcp-sql-server",
             "version", "1.0.0"
@@ -294,36 +351,57 @@ public class SqlMcpServer {
         return Map.of("tools", tools);
     }
 
-    private static Map<String, Object> handleToolCall(Map<String, Object> params) throws Exception {
-        String toolName = (String) params.get("name");
+    private static Map<String, Object> handleToolCall(Map<String, Object> params) throws JsonRpcException {
+        if (!(params.get("name") instanceof String toolName)) {
+            throw new JsonRpcException(-32602, "Missing tool name");
+        }
         @SuppressWarnings("unchecked")
-        Map<String, Object> arguments = (Map<String, Object>) params.getOrDefault("arguments", new HashMap<>());
-        
-        Object result = switch (toolName) {
-            case "list_schemas" -> databaseService.listSchemas();
-            case "list_tables" -> databaseService.listTables((String) arguments.get("schema"));
-            case "get_table_structure" -> {
-                TableInfo tableInfo = databaseService.getTableStructure(
-                    (String) arguments.get("schema"),
-                    (String) arguments.get("table")
+        Map<String, Object> arguments = params.get("arguments") instanceof Map<?, ?> a
+            ? (Map<String, Object>) a
+            : new HashMap<>();
+
+        try {
+            Object result = switch (toolName) {
+                case "list_schemas" -> databaseService.listSchemas();
+                case "list_tables" -> databaseService.listTables(stringArg(arguments, "schema"));
+                case "get_table_structure" -> {
+                    TableInfo tableInfo = databaseService.getTableStructure(
+                        stringArg(arguments, "schema"),
+                        stringArg(arguments, "table")
+                    );
+                    yield formatTableStructure(tableInfo);
+                }
+                case "query_table" -> databaseService.queryTable(
+                    stringArg(arguments, "schema"),
+                    stringArg(arguments, "table"),
+                    arguments.get("limit") instanceof Number n ? n.intValue() : null
                 );
-                yield formatTableStructure(tableInfo);
-            }
-            case "query_table" -> databaseService.queryTable(
-                (String) arguments.get("schema"),
-                (String) arguments.get("table"),
-                (Integer) arguments.get("limit")
-            );
-            case "execute_query" -> databaseService.executeQuery((String) arguments.get("sql"));
-            default -> throw new IllegalArgumentException("Unknown tool: " + toolName);
-        };
-        
-        return Map.of(
-            "content", List.of(Map.of(
-                "type", "text",
-                "text", objectMapper.writeValueAsString(result)
-            ))
-        );
+                case "execute_query" -> databaseService.executeQuery(stringArg(arguments, "sql"));
+                default -> throw new JsonRpcException(-32602, "Unknown tool: " + toolName);
+            };
+
+            return toolResult(objectMapper.writeValueAsString(result), false);
+        } catch (JsonRpcException e) {
+            throw e;
+        } catch (Exception e) {
+            // Tool execution errors are reported in the result so the model can see and react to them
+            logger.error("Tool {} failed", toolName, e);
+            return toolResult(e.getMessage() != null ? e.getMessage() : e.toString(), true);
+        }
+    }
+
+    private static String stringArg(Map<String, Object> arguments, String name) {
+        Object value = arguments.get(name);
+        return value == null ? null : value.toString();
+    }
+
+    private static Map<String, Object> toolResult(String text, boolean isError) {
+        Map<String, Object> result = new HashMap<>();
+        result.put("content", List.of(Map.of("type", "text", "text", text)));
+        if (isError) {
+            result.put("isError", true);
+        }
+        return result;
     }
 
     private static Map<String, Object> formatTableStructure(TableInfo tableInfo) {
