@@ -30,8 +30,8 @@ Set the following environment variables:
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `JMCP_JDBC_URL` | Yes | - | JDBC connection URL |
-| `JMCP_DB_USERNAME` | Yes | - | Database username |
-| `JMCP_DB_PASSWORD` | Yes | - | Database password |
+| `JMCP_DB_USERNAME` | Yes (not for SQLite) | - | Database username |
+| `JMCP_DB_PASSWORD` | Yes (not for SQLite) | - | Database password |
 | `JMCP_MODE` | No | `stdio` | Server mode: `stdio` or `http` |
 | `JMCP_HTTP_PORT` | No | `3000` | HTTP server port (only for `http` mode) |
 | `JMCP_QUERY_SELECT_ONLY` | No | `true` | If `true`, only SELECT queries are allowed. If `false`, allows INSERT, UPDATE, DELETE, etc. |
@@ -140,18 +140,18 @@ The server starts an HTTP server with SSE (Server-Sent Events) support, allowing
 #### Step 1: Start the server in HTTP mode
 
 ```bash
-export JDBC_URL="jdbc:postgresql://localhost:5432/mydb"
-export DB_USERNAME="postgres"
-export DB_PASSWORD="password"
-export MCP_MODE="http"
-export MCP_HTTP_PORT="3000"
+export JMCP_JDBC_URL="jdbc:postgresql://localhost:5432/mydb"
+export JMCP_DB_USERNAME="postgres"
+export JMCP_DB_PASSWORD="password"
+export JMCP_MODE="http"
+export JMCP_HTTP_PORT="3000"
 java -jar target/java-mcp-sql-server-1.0.0.jar
 ```
 
 Or use the provided scripts (`run_http.sh` or `run_http.ps1`).
 
 The server will be available at `http://localhost:3000` with the following endpoints:
-- `/mcp` - SSE endpoint for MCP protocol
+- `/mcp` - MCP endpoint (`POST` for JSON-RPC requests; `GET` opens an SSE stream)
 - `/health` - Health check endpoint
 
 #### Step 2: Configure the MCP client
