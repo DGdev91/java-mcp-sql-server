@@ -7,7 +7,7 @@
 
     <groupId>com.dgdev91</groupId>
     <artifactId>java-mcp-sql-server</artifactId>
-    <version>1.0.0</version>
+    <version>1.0.1</version>
     <packaging>jar</packaging>
 
     <name>Java MCP SQL Server</name>

@@ -126,7 +126,7 @@ public class SqlMcpServer {
             ctx.json(Map.of(
                 "status", "ok",
                 "server", "java-mcp-sql-server",
-                "version", "1.0.0",
+                "version", "1.0.1",
                 "connectedClients", sseClients.size()
             ));
         });
@@ -247,7 +247,7 @@ public class SqlMcpServer {
         result.put("protocolVersion", protocolVersion);
         result.put("serverInfo", Map.of(
             "name", "java-mcp-sql-server",
-            "version", "1.0.0"
+            "version", "1.0.1"
         ));
         
         Map<String, Object> capabilities = new HashMap<>();
