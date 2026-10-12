@@ -2,6 +2,7 @@ package com.dgdev91.mcpsql.service;
 
 import com.dgdev91.mcpsql.model.ColumnInfo;
 import com.dgdev91.mcpsql.model.DatabaseConfig;
+import com.dgdev91.mcpsql.model.DatabaseType;
 import com.dgdev91.mcpsql.model.TableInfo;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -185,13 +186,26 @@ public class DatabaseService {
         return schemas;
     }
 
+    // MySQL/MariaDB have no schemas: what listSchemas() returns are databases, i.e. JDBC catalogs
+    private boolean schemaIsCatalog() {
+        return config.getType() == DatabaseType.MYSQL || config.getType() == DatabaseType.MARIADB;
+    }
+
+    private String catalogFor(String schema) {
+        return schemaIsCatalog() ? schema : null;
+    }
+
+    private String schemaPatternFor(String schema) {
+        return schemaIsCatalog() ? null : schema;
+    }
+
     public List<String> listTables(String schema) throws SQLException {
         List<String> tables = new ArrayList<>();
         
         try (Connection conn = getConnection()) {
             DatabaseMetaData metaData = conn.getMetaData();
             
-            try (ResultSet rs = metaData.getTables(null, schema, "%", new String[]{"TABLE"})) {
+            try (ResultSet rs = metaData.getTables(catalogFor(schema), schemaPatternFor(schema), "%", new String[]{"TABLE"})) {
                 while (rs.next()) {
                     tables.add(rs.getString("TABLE_NAME"));
                 }
@@ -209,14 +223,14 @@ public class DatabaseService {
             DatabaseMetaData metaData = conn.getMetaData();
             
             // Get primary keys
-            try (ResultSet rs = metaData.getPrimaryKeys(null, schema, tableName)) {
+            try (ResultSet rs = metaData.getPrimaryKeys(catalogFor(schema), schemaPatternFor(schema), tableName)) {
                 while (rs.next()) {
                     primaryKeys.add(rs.getString("COLUMN_NAME"));
                 }
             }
             
             // Get columns
-            try (ResultSet rs = metaData.getColumns(null, schema, tableName, "%")) {
+            try (ResultSet rs = metaData.getColumns(catalogFor(schema), schemaPatternFor(schema), tableName, "%")) {
                 while (rs.next()) {
                     String columnName = rs.getString("COLUMN_NAME");
                     String dataType = rs.getString("TYPE_NAME");
@@ -276,6 +290,9 @@ public class DatabaseService {
         
         switch (config.getType()) {
             case POSTGRESQL:
+            case MYSQL:
+            case MARIADB:
+            case SQLITE:
                 return SELECT_FROM + fullTableName + " LIMIT ?";
             case ORACLE:
                 return SELECT_FROM + fullTableName + " WHERE ROWNUM <= ?";
@@ -300,8 +317,8 @@ public class DatabaseService {
         if (limit == null || limit <= 0) {
             return false;
         }
-        return config.getType() == com.dgdev91.mcpsql.model.DatabaseType.POSTGRESQL || 
-               config.getType() == com.dgdev91.mcpsql.model.DatabaseType.ORACLE;
+        // SQL Server inlines the (already validated) limit as TOP n
+        return config.getType() != DatabaseType.SQLSERVER;
     }
     
     private List<Map<String, Object>> executeWithPreparedStatement(Connection conn, String query, Integer limit) throws SQLException {

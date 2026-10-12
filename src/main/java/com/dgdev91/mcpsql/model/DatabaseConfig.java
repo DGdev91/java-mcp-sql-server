@@ -26,6 +26,12 @@ public class DatabaseConfig {
             return DatabaseType.ORACLE;
         } else if (jdbcUrl.startsWith("jdbc:sqlserver:")) {
             return DatabaseType.SQLSERVER;
+        } else if (jdbcUrl.startsWith("jdbc:mysql:")) {
+            return DatabaseType.MYSQL;
+        } else if (jdbcUrl.startsWith("jdbc:mariadb:")) {
+            return DatabaseType.MARIADB;
+        } else if (jdbcUrl.startsWith("jdbc:sqlite:")) {
+            return DatabaseType.SQLITE;
         }
         throw new IllegalArgumentException("Unsupported database type in JDBC URL: " + jdbcUrl);
     }

@@ -34,9 +34,15 @@ public class SqlMcpServer {
         String querySelectOnlyStr = System.getenv("JMCP_QUERY_SELECT_ONLY");
         boolean querySelectOnly = querySelectOnlyStr == null || !querySelectOnlyStr.equalsIgnoreCase("false");
         
-        if (jdbcUrl == null || username == null || password == null) {
+        // SQLite files have no credentials
+        boolean isSqlite = jdbcUrl != null && jdbcUrl.startsWith("jdbc:sqlite:");
+        if (jdbcUrl == null || (!isSqlite && (username == null || password == null))) {
             logger.error("Missing required environment variables: JMCP_JDBC_URL, JMCP_DB_USERNAME, JMCP_DB_PASSWORD");
             System.exit(1);
+        }
+        if (isSqlite) {
+            username = username != null ? username : "";
+            password = password != null ? password : "";
         }
         
         try {
